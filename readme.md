@@ -83,6 +83,16 @@ Thumbs.db
 *~
 ._*
 
+Encrypt data (optional)
+-----------------------
+If you're just backing up data to a private server, it's probably not necessary to encrypt it beforehand.  The transfer scripts described above will encrypt the data as it is transferred via ssh, and if the server is only accessible via an RSA key it should be pretty secure.  However, if the server is set up to share the files more publicly or the data is backed up to third party cloud storage service (e.g. DropBox), you might want to encrypt some file before transferring, just to protect it (e.g. in case someone gets your DropBox password).  
+
+One encryption option is encfs which works on Linux or OS X (see [this custom homebrew formula](https://github.com/jollyjinx/encfs.macosx) for one option for getting encfs working with OS X).  It allows you to mount a folder ("tmp") as a drive linked to a second folder ("enc").  Anything that is saved into tmp is actually saved into "enc" in encrypted form.  This functionality does not totally encrypt the data (each file is encrypted separately so you can still read the file size and see the directory hierarchy), but it does work with versioned backups.
+
+In the `encryption` folder, there are two scripts, `encode_vault.sh` and `vault_update.applescript`, that help with encrypting files for back up.  `encode_vault.sh` mounts an encfs folder named `enc` to a folder named `tmp`, syncs the contents of the folder containing `encode_vault.sh` into `tmp` and then unmounts it.  The folder containing `encode_vault.sh` should be named `plain` and should also contain the encfs .xml file for the encrypted folder.  The `vault_update.applescript` script just calls `encode_vault.sh` after prompting for the password.  It could be saved as an .app file for easy calling from Spotlight in OS X.  Note that the script is set up to be run in OS X, and the `umount` command needs to be changed to `fusermount -u` for Linux.
+
+When you set up the encrypted folder for the first time, encfs creates a file named `.encfs6.xml` in the encrypted folder.  This file contains the password encrypted version of the encryption key for the encfs folder.  The script needs this file to be moved to the `plain` folder because the idea is that the `enc` folder will be backed up to a less secure location.  If the `.encfs6.xml` file were left in the `enc` folder, someone would just need to guess the password to unencrypt the key and thus all of the files.  Without the `.encfs6.xml` file, someone would need to guess the entire key.  It's probably a good idea to back up the `.encfs6.xml` since the files can't be unencrypted without it, but I'd recommend backing it up somewhere else that it's unlikely that someone trying to access your files would look.  It's not a very big file, so you could, for example, give it an innocuous name and email it to yourself as an attachment.
+
 Appendix: extra stuff not done
 ==============================
 
