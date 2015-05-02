@@ -5,25 +5,28 @@ the settings defined in a yaml config file.
 """
 
 import argparse
-from datetime import datetime as dtime
+import datetime as dtime
 import logging
 import os
-import os.path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
 import yaml
 
 DATE_FORMAT = '%Y-%m-%d_%Hh%Mm%Ss'
+# TODO: Use ssh-agent to limit number of connection attempts?
+
+# TODO: rsync option merging + no- options
+# TODO: provide sample config file for logrotate and simple single rotation
+# option
+# TODO: option to transfer logfile to remote host
 # TODO: Test remote source transfers
 # TODO: Test remote dest transfers
-# TODO: option to transfer logfile to remote host
-# TODO: provide sample config file for logrotate
 # TODO: Make cmd class that knows src/dest/host and when to wrap commands in
 #       an ssh call
-# TODO: Use ssh-agent to limit number of connection attempts?
 
 
 def pid_running(pid):
@@ -81,14 +84,30 @@ def parse_config(config_file, backup_state):
     else:
         config['rsync_opts'] = default_rsync_opts
 
+    if not config.get('aging_params'):
+        config['aging_params'] = [
+            [0.5/24, 2],
+            [1, 14],
+            [7, 60],
+            [30, 730],
+            [365, -1]]
+    config['aging_params'] = [{'spacing': item[0], 'bound': item[1]}
+                              for item in config['aging_parms']]
+
     remote = config.get('remote')
     if remote:
         if 'location' not in remote or 'host' not in remote:
-            WSBackupError(('"remote" config setting must include host and '
-                           'location.'))
+            err_str = ('"remote" config setting must include host and '
+                       'location.')
+            logging.critical(err_str)
+            WSBackupError(err_str)
         if remote['location'] not in ['src', 'dest']:
-            WSBackupError(('"remote:location" config setting must be "src" or '
-                           '"dest"'))
+            err_str = ('"remote:location" config setting must be "src" or '
+                       '"dest"')
+            logging.critical(err_str)
+            WSBackupError(err_str)
+
+    config['backup_time'] = None
 
     return config
 
@@ -186,21 +205,114 @@ class Backup(object):
         logging.info('Backup finished')
         self.cleanup()
 
+    def get_backup_list(self):
+        """Get list of all backup directories"""
+        remote = self.config.get('remote', {})
+        rem_loc = remote.get('location', None)
+        if rem_loc == 'dest':
+            ssh_cmd = 'ls "{dest}"'.format(dest=self.config['destination'])
+            ssh_cmd = 'ssh {host} {cmd}'.format(host=remote['host'],
+                                                cmd=ssh_cmd)
+            backup_list = subprocess.check_output(shlex.split(ssh_cmd))
+            backup_list = backup_list.split('\n')
+        else:
+            backup_list = os.listdir(self.config['destination'])
+
+        def valid_date(datestring):
+            """Test string against DATE_FORMAT"""
+            try:
+                dtime.datetime.strptime(datestring, DATE_FORMAT)
+                return True
+            except ValueError:
+                return False
+        backup_list = [item for item in backup_list if valid_date(item)]
+
+    def sort_by_age(self, backup_list):
+        """Sort backups into groups by age index"""
+        # Sort oldest to newest
+        backup_list.sort()
+
+        # Get reference time for calculating backup age
+        now = self.config.get('backup_time')
+        if now:
+            now = dtime.datetime.strptime(now, DATE_FORMAT)
+        else:
+            now = dtime.datetime.now()
+
+        # Sort backups into appropriate age index
+        aging_params = self.config['aging_params']
+        backups = [[]]*len(aging_params)
+        deletions = []
+        for date_str in backup_list:
+            dt_obj = dtime.datetime.strptime(date_str, DATE_FORMAT)
+
+            age_index = None
+            for index, bound in enumerate(p['bound'] for p in aging_params):
+                if now - dt_obj < dtime.timedelta(bound) or bound == -1:
+                    age_index = index
+
+            if age_index is None:
+                deletions.append(date_str)
+            else:
+                backups[age_index].append({'date_str': date_str,
+                                           'dt_obj': dt_obj})
+
+        return (backups, deletions)
+
     def prune_backup(self):
         """
         Call function to prune old backups that are no longer needed.
         """
-        # TODO: Actually run the backup pruning function
-        remote = self.config.get('remote', {})
-        host = remote.get('host', None)
-        if host:
-            rsync_cmd = 'rsync --compress "{f_prune}" "{host}:{dest}"'
-            f_prune = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                                   'wsbackup_prune.py')
-            rsync_cmd = rsync_cmd.format(f_prune=f_prune,
-                                         host=host,
-                                         dest=self.config['destination'])
-            subprocess.check_call(shlex.split(rsync_cmd))
+        backup_list = self.get_backup_list()
+
+        backups, deletions = self.sort_by_age(backup_list)
+
+        # Loop through each index from oldest to newest backup. Whenever two
+        # backups are found within the spacing for that age index, delete the
+        # newer backup (except the newest overall with that age index).
+        #
+        # WARNING: be careful editing the logic here. It is very easy to create
+        # something that seems reasonable but would delete many backups. For
+        # example, if, when two backups are within a spacing, the newer backup
+        # were kept instead of the older, then, if new backups were made more
+        # frequently than the smallest spacing, the next newest backup would
+        # always be deleted for being too close to the latest backup and there
+        # would never be more than two backups in the first age index.
+        for age_index, age_subset in enumerate(backups):
+            if len(age_subset) < 3:
+                continue
+            spacing = self.config['aging_params'][age_index]['spacing']
+            # Always keep newest backup with a given age index
+            age_subset.pop()
+            # Always keep oldest backup with a given age index.
+            # Use it to start checking spacings between backups
+            prev_backup = age_subset.pop(0)
+            for backup in age_subset:
+                current_spacing = backup['dt_obj'] - prev_backup['dt_obj']
+                if current_spacing < dtime.timedelta(spacing):
+                    deletions.append(backup['date_str'])
+                else:
+                    prev_backup = backup
+
+        # Delete backups
+        logging.info('Pruning the following backups: %(b_list)s',
+                     ' '.join(deletions))
+        self.remove_backups(deletions)
+
+    def remove_backups(self, deletions):
+        """Remove directories in deletions from destination"""
+        remote = self.config.get('remote', {'location': None})
+        if remote['location'] == 'dest':
+            dirs = ' '.join('"{}"'.format(d) for d in deletions)
+            cmd = 'cd {dest} && rm -rf {dirs}'
+            cmd = cmd.format(dest=self.config['destination'],
+                             dirs=dirs)
+            ssh_cmd = 'ssh {host} "{cmd}"'.format(host=remote['host'],
+                                                  cmd=cmd)
+            subprocess.check_call(shlex.split(ssh_cmd))
+        else:
+            for backup in deletions:
+                shutil.rmtree(os.path.join(self.config['destination'], backup))
 
     def transfer_files(self):
         """
@@ -258,7 +370,8 @@ class Backup(object):
         cmd = "mv '{target_inc}' '{target_date}'"
         dest = self.config['destination']
         target_inc = os.path.join(dest, 'incomplete')
-        date_str = dtime.now().strftime(DATE_FORMAT)
+        date_str = dtime.datetime.now().strftime(DATE_FORMAT)
+        self.config['backup_time'] = date_str
         target_date = os.path.join(dest, date_str)
         cmd = cmd.format(target_inc=target_inc, target_date=target_date)
         remote = self.config.get('remote', {})
@@ -312,8 +425,8 @@ class Backup(object):
             try:
                 subprocess.check_call(shlex.split(ssh_test))
             except subprocess.CalledProcessError:
-                log_str = ('Target {target} does not exist on '
-                           '{host}. Backup stopped.')
+                log_str = ('Target %(target)s does not exist on '
+                           '%(host)s. Backup stopped.')
                 logging.critical(log_str, {'target': path, 'host': host})
                 self.cleanup()
                 raise WSBackupError(log_str, {'target': path, 'host': host})
