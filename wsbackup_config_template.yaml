@@ -11,7 +11,12 @@ excludes: /path/to/excludes.xcl
 # Path to the log file to create or append to. Treated as a relative path if
 # not an absolute path. If not specified, log file is created in the same
 # directory as the yaml config file with the name of id.log.
-logfile: /path/to/logfile.log
+logfile:
+    path: /path/to/logfile.log
+    max_bytes: 1e6
+    backup_count: 5
+    mode: 'a'
+    copy_to_dest: False
 
 # remote settings
 # omit remote to backup between local directories
@@ -30,3 +35,13 @@ sources:
 # Target to pass as the rsync DEST argument. Can either be another path on the
 # system, or a ssh formatted path to a remote destination.
 destination: /some/target/path
+
+rsync_opts:
+- --archive
+- --delete
+- -hhh
+- --stats
+# For remote:
+- --compress
+# Necessary?
+# - --chmod=ug+w
