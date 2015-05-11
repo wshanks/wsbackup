@@ -1,9 +1,10 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 """Create test data for wsbackup_transfer.py"""
 import argparse
 from calendar import timegm
 import os
 import shutil
+import sys
 
 
 def get_time(depth, maxdepth):
@@ -24,7 +25,8 @@ def create_file(root, depth, index, maxdepth):
         data_str = data_str.format(idx=index, dep=depth)
         data = [data_str]*(index+1)*100
         data = '\n'.join(data)
-        print(data, file=tfile)
+        # print(data, file=tfile)
+        tfile.write(data)
 
     os.utime(fpath, 2*(get_time(depth, maxdepth),))
 
@@ -57,24 +59,41 @@ def clean_dir(root):
 
 def main(args):
     """ Main function"""
-    if not os.path.exists(args['src']):
-        os.makedirs(args['src'])
-    else:
-        clean_dir(args['src'])
-    create_src(args['src'], 0, args['iterations'])
-
     if not os.path.exists(args['dest']):
         os.makedirs(args['dest'])
     elif args['clean']:
         clean_dir(args['dest'])
+
+    for idx in range(args['iterations']):
+        if not os.path.exists(args['src']):
+            os.makedirs(args['src'])
+        else:
+            clean_dir(args['src'])
+        create_src(args['src'], 0, idx)
+        if args['backup']:
+            if idx > 0:
+                import time
+                # Make sure backups are at least 1 second apart
+                time.sleep(1)
+            script_path = os.path.abspath(__file__)
+            par_dir = os.path.dirname(os.path.dirname(script_path))
+            sys.path.insert(0, par_dir)
+            from wsbackup import Backup
+
+            with Backup(args['config']) as backup_state:
+                backup_state.process_backup()
 
 
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser('Create test files')
     PARSER.add_argument('--iterations', '-i', default=1, type=int,
                         help='File creations to perform')
-    PARSER.add_argument('--clean', '-c', action='store_true',
+    PARSER.add_argument('--clean', '-C', action='store_true',
                         help='Clean dest folder')
+    PARSER.add_argument('--backup', '-b', action='store_true',
+                        help='Run backup using specified config file')
+    PARSER.add_argument('--config', '-c',
+                        help='wsbackup config file')
     PARSER.add_argument('src', type=str, default='src', nargs='?',
                         help='Source directory')
     PARSER.add_argument('dest', type=str, default='dest', nargs='?',

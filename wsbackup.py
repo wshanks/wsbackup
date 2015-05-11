@@ -7,6 +7,7 @@ the settings defined in a yaml config file.
 import argparse
 import datetime as dtime
 import logging
+import logging.handlers
 import os
 import re
 import shlex
@@ -19,8 +20,7 @@ import yaml
 DATE_FORMAT = '%Y-%m-%d_%Hh%Mm%Ss'
 # TODO: Use ssh-agent to limit number of connection attempts?
 
-# TODO: Test remote source transfers
-# TODO: Test remote dest transfers
+# TODO: Test pruning
 
 
 def pid_running(pid):
@@ -38,6 +38,31 @@ class WSBackupError(Exception):
     Class for unexpected situations encountered when performing backup
     """
     pass
+
+
+def num_eval(expr):
+    """
+    Evaluate numerical expression expr containing floats and * and / operators
+    only
+    """
+    div_parts = expr.split('/')
+    val = float(div_parts.pop(0))
+    for d_part in div_parts:
+        mult_parts = d_part.split('*')
+        val = val / float(mult_parts.pop(0))
+        for m_part in mult_parts:
+            val = val * float(m_part)
+
+    return val
+
+
+def escape(path):
+    """
+    Escape path with "'s if it is not already escaped with them.
+    """
+    if not (path[0] == '"' and path[-1] == '"'):
+        path = '"{}"'.format(path)
+    return path
 
 
 def logfile_config(logfile, backup_id, working_dir):
@@ -62,8 +87,10 @@ def logfile_config(logfile, backup_id, working_dir):
         if key not in logfile:
             logfile[key] = defaults[key]
 
-    return logfile
+    if not isinstance(logfile['max_bytes'], int):
+        logfile['max_bytes'] = int(num_eval(logfile['max_bytes']))
 
+    return logfile
 
 
 def add_out_format(rsync_opts):
@@ -142,17 +169,23 @@ class Backup(object):
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.INFO)
 
-        file_handler = logging.handlers.RotatingFileHandler(
-            self.config['logfile']['path'],
-            mode=self.config['logfile']['mode'],
-            maxBytes=self.config['logfile']['max_bytes'],
-            backupCount=self.config['logfile']['backup_count'])
-        file_handler.setFormatter(log_formatter)
-        root_logger.addHandler(file_handler)
+        names = [h.name for h in root_logger.handlers]
 
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(log_formatter)
-        root_logger.addHandler(console_handler)
+        if 'logfile' not in names:
+            file_handler = logging.handlers.RotatingFileHandler(
+                self.config['logfile']['path'],
+                mode=self.config['logfile']['mode'],
+                maxBytes=self.config['logfile']['max_bytes'],
+                backupCount=self.config['logfile']['backup_count'])
+            file_handler.setFormatter(log_formatter)
+            file_handler.set_name('logfile')
+            root_logger.addHandler(file_handler)
+
+        if 'stdout' not in names:
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setFormatter(log_formatter)
+            console_handler.set_name('stdout')
+            root_logger.addHandler(console_handler)
 
     def backup_error(self, msg):
         """Log error and raise exception"""
@@ -201,8 +234,14 @@ class Backup(object):
                 [7, 60],
                 [30, 730],
                 [365, -1]]
+        # Evaluate any numerical expressions
+        for pidx, pair in enumerate(config['aging_params']):
+            for vidx, val in enumerate(pair):
+                if isinstance(val, str):
+                    config['aging_params'][pidx][vidx] = num_eval(val)
+
         config['aging_params'] = [{'spacing': item[0], 'bound': item[1]}
-                                  for item in config['aging_parms']]
+                                  for item in config['aging_params']]
 
         remote = config.get('remote')
         if remote:
@@ -251,10 +290,23 @@ class Backup(object):
                 not self.config['logfile']['copy_to_dest']):
             return
 
-        cmd = 'rsync "{log}" {host}:"{dest}"'
-        cmd = cmd.format(log=self.config['logfile']['path'],
-                         dest=self.config['destination'])
+        log_base = self.config['logfile']['path']
+        cmd_fmt = 'rsync {log} {host}:{dest}'
+        cmd = cmd_fmt.format(log=escape(log_base),
+                             host=self.config['remote']['host'],
+                             dest=escape(self.config['destination']))
         self.exec_cmd(cmd, context='remote')
+        idx = 1
+        while True:
+            path = '{base}.{idx}'.format(base=log_base, idx=idx)
+            if os.path.exists(path):
+                cmd = cmd_fmt.format(log=escape(path),
+                                     host=self.config['remote']['host'],
+                                     dest=escape(self.config['destination']))
+                self.exec_cmd(cmd, context='remote')
+                idx = idx + 1
+            else:
+                break
 
     def process_backup(self):
         """Main function for processing a backup request"""
@@ -271,7 +323,7 @@ class Backup(object):
     def get_backup_list(self):
         """Get list of all backup directories"""
         if self.config['remote']['location'] == 'dest':
-            cmd = 'ls "{dest}"'.format(dest=self.config['destination'])
+            cmd = 'ls {dest}'.format(dest=escape(self.config['destination']))
             backup_list = self.exec_cmd(cmd, context='dest', output='output')
             backup_list = backup_list.split('\n')
         else:
@@ -285,6 +337,7 @@ class Backup(object):
             except ValueError:
                 return False
         backup_list = [item for item in backup_list if valid_date(item)]
+        return backup_list
 
     def sort_by_age(self, backup_list):
         """Sort backups into groups by age index"""
@@ -300,7 +353,7 @@ class Backup(object):
 
         # Sort backups into appropriate age index
         aging_params = self.config['aging_params']
-        backups = [[]]*len(aging_params)
+        backups = [[] for a in aging_params]
         deletions = []
         for date_str in backup_list:
             dt_obj = dtime.datetime.strptime(date_str, DATE_FORMAT)
@@ -309,6 +362,7 @@ class Backup(object):
             for index, bound in enumerate(p['bound'] for p in aging_params):
                 if now - dt_obj < dtime.timedelta(bound) or bound == -1:
                     age_index = index
+                    break
 
             if age_index is None:
                 deletions.append(date_str)
@@ -322,6 +376,7 @@ class Backup(object):
         """
         Call function to prune old backups that are no longer needed.
         """
+        # import pudb; pudb.set_trace()
         backup_list = self.get_backup_list()
 
         backups, deletions = self.sort_by_age(backup_list)
@@ -355,7 +410,7 @@ class Backup(object):
 
         # Delete backups
         logging.info('Pruning the following backups: %(b_list)s',
-                     ' '.join(deletions))
+                     {'b_list': ' '.join(deletions)})
         if not is_dry_run(self.config['rsync_opts']):
             self.remove_backups(deletions)
 
@@ -365,7 +420,7 @@ class Backup(object):
         if remote['location'] == 'dest':
             dirs = ' '.join('"{}"'.format(d) for d in deletions)
             cmd = 'cd {dest} && rm -rf {dirs}'
-            cmd = cmd.format(dest=self.config['destination'],
+            cmd = cmd.format(dest=escape(self.config['destination']),
                              dirs=dirs)
             self.exec_cmd(cmd, context='dest')
         else:
@@ -377,29 +432,32 @@ class Backup(object):
         Perform backup transfer of files
         """
         remote = self.config['remote']
-        sources = self.config['sources']
-        dest = self.config['destination']
+        sources = [escape(s) for s in self.config['sources']]
+        dest = escape(self.config['destination'])
         if remote['location'] is not None:
             if remote['location'] == 'src':
-                sources = ['{{host}}:' + src for src in sources]
+                sources = ['{host}:' + src for src in sources]
             else:
-                dest = '{{host}}:' + dest
+                dest = '{host}:' + dest
 
         rsync_cmd = ['rsync']
 
         # Link against "latest" backup directory if it exists
         latest_exists = False
-        latest = os.path.join(dest, 'latest')
+        latest = os.path.join(self.config['destination'], 'latest')
         if remote['location'] == 'dest':
+            latest = escape(latest)
             cmd = 'test -e {latest}'.format(latest=latest)
-            latest_exists = self.exec_cmd(cmd, context='dest') == 0
+            latest_exists = (0 == self.exec_cmd(cmd,
+                                                context='dest',
+                                                output='exit_code'))
         else:
             latest_exists = os.path.exists(latest)
         if latest_exists:
             rsync_cmd.append('--link-dest=../latest')
 
         log_fmt = '%t [%p] %o %f (%b / %l)'
-        lfile = self.config['logfile']
+        lfile = escape(self.config['logfile']['path'])
         rsync_cmd.append('--log-file={lfile}'.format(lfile=lfile))
         new_opt = '--log-file-format="{log_fmt}"'.format(log_fmt=log_fmt)
         rsync_cmd.append(new_opt)
@@ -423,23 +481,25 @@ class Backup(object):
         """
         Update the "latest" symlink to point to the new backup directory.
         """
-        cmd = "mv '{target_inc}' '{target_date}'"
+        cmd = "mv {target_inc} {target_date}"
         dest = self.config['destination']
         target_inc = os.path.join(dest, 'incomplete')
         date_str = dtime.datetime.now().strftime(DATE_FORMAT)
         self.config['backup_time'] = date_str
         target_date = os.path.join(dest, date_str)
-        cmd = cmd.format(target_inc=target_inc, target_date=target_date)
+        cmd = cmd.format(target_inc=escape(target_inc),
+                         target_date=escape(target_date))
         self.exec_cmd(cmd, context='dest')
 
         # symlink backup to latest
-        cmd = ("rm -f '{target_latest}'")
+        cmd = ("rm -f {target_latest}")
         cmd = cmd.format(target_date=date_str,
-                         target_latest=os.path.join(dest, 'latest'))
+                         target_latest=escape(os.path.join(dest, 'latest')))
         self.exec_cmd(cmd, context='dest')
 
-        cmd = ("ln -s '{target_date}' '{target_latest}'")
-        cmd = cmd.format(target_latest=os.path.join(dest, 'latest'))
+        cmd = ("ln -s {target_date} {target_latest}")
+        cmd = cmd.format(target_date=escape(date_str),
+                         target_latest=escape(os.path.join(dest, 'latest')))
         self.exec_cmd(cmd, context='dest')
 
     def validate_host(self):
@@ -447,12 +507,12 @@ class Backup(object):
         Run through a series of checks on a remote host to make sure connection
         settings will work for transferring files for the backup.
         """
-        remote = self.config.get('remote', {})
-        if remote is None:
+        remote = self.config.get('remote', None)
+        if remote['location'] is None:
             return
 
         # Test connectivity
-        cmd = ("-q -q -o 'BatchMode=yes' -o 'ConnectTimeout 10' "
+        cmd = ("ssh {host} -q -q -o 'BatchMode=yes' -o 'ConnectTimeout 10' "
                "exit &> /dev/null")
         self.exec_cmd(cmd, context='remote',
                       err_str='SSH connection {host} failed.')
@@ -464,7 +524,7 @@ class Backup(object):
             paths = [self.config['destination']]
 
         for path in paths:
-            cmd = "[ -d '{target}' ]".format(target=path)
+            cmd = "ssh {{host}} [ -d '{target}' ]".format(target=escape(path))
             err_str = ('Target {target} does not exist on '
                        '{{host}}.').format(target=path)
             self.exec_cmd(cmd, context='remote', err_str=err_str)
@@ -485,7 +545,7 @@ class Backup(object):
         remote = self.config['remote']
         if (context == 'src' and remote['location'] == 'src' or
                 context == 'dest' and remote['location'] == 'dest' or
-                context == 'src-dest' and remote or
+                context == 'src-dest' and remote['location'] or
                 context == 'remote'):
             loc = 'remote'
         else:
@@ -496,6 +556,9 @@ class Backup(object):
                                               cmd=cmd)
         elif loc == 'remote':
             cmd = cmd.format(host=remote['host'])
+
+        if not err_str:
+            err_str = 'Error executing command: {}'.format(cmd)
 
         if re.search('{host}', err_str):
             err_str = err_str.format(host=remote['host'])
