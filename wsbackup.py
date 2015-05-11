@@ -87,7 +87,9 @@ def logfile_config(logfile, backup_id, working_dir):
         if key not in logfile:
             logfile[key] = defaults[key]
 
-    if not isinstance(logfile['max_bytes'], int):
+    if isinstance(logfile['max_bytes'], float):
+        logfile['max_bytes'] = int(logfile['max_bytes'])
+    else:
         logfile['max_bytes'] = int(num_eval(logfile['max_bytes']))
 
     return logfile
