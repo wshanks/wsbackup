@@ -2,6 +2,8 @@ Backup notes
 ============
 Introduction
 ------------
+*NOTE:* these notes were written for the previous bash script version of the backup script. The general set up instructions still apply but the usage has changed. Now the script is `wsbackup.py`, and it requires that the `PyYAML` Python package be installed. The basic usage is to call it with a `-c` flag pointing to a config file formatted like `wsbackup_config_template.yaml`. Read the comments in that file and the output of `wsbackup.py -h` for more information. An update to this README needs to be made.
+
 These notes describe setting up a simple Ubuntu backup server for backing up remotely from another computer running Linux or OSX.  It is probably also possible to follow these notes to backup to a computer running OSX or backup from a computer running Windows (via cygwin) (Some subtle adjustments would probably be necessary.  For instance, you might need to tell rsync to use less precision in comparing file modification times).  These notes also assume that the backup server is being set up on a router, but it would probably not be too hard to set it up without one.
 
 Choose back up disk file system
