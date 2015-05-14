@@ -20,8 +20,6 @@ import yaml
 DATE_FORMAT = '%Y-%m-%d_%Hh%Mm%Ss'
 # TODO: Use ssh-agent to limit number of connection attempts?
 
-# TODO: Test pruning
-
 
 def pid_running(pid):
     """ Check For the existence of a unix pid. """
@@ -318,9 +316,9 @@ class Backup(object):
         files_transferred = self.transfer_files()
         if files_transferred:
             self.update_latest()
-            self.prune_backup()
-            logging.info('Backup finished')
-            self.transfer_log()
+        self.prune_backup()
+        logging.info('Backup finished')
+        self.transfer_log()
 
         self.cleanup()
 
