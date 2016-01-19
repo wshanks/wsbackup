@@ -8,9 +8,13 @@ id: my_backup
 # yaml config file, it is also used.
 excludes: /path/to/excludes.xcl
 
+# Lockfile path. Overrides the default path of id.lck (with id from above) in
+# the folder with the config file
+# lockfile: /path/to/lockfile
+
 # Logfile settings
-# (Other than path, the values given below are the defaults, and do not need to
-# be specified).
+# (Other than path, the values given below are the defaults. None of values
+# need to be specified).
 # path: path to logfile to use. Defaults to id.log in the working directory
 # backup_count: number of rotated log files to keep (0 keeps all logs)
 # max_bytes: maximum size in bytes of log file before it is rotated (0 never
@@ -56,3 +60,17 @@ rsync_opts:
 - --chmod=u+rw
 # For remote:
 # - --compress
+
+# aging_params -- how to prune old backups
+# 
+# A list of pairs of numbers. The first number is the spacing to use between
+# retained backups and the second number is the oldest backups can be for this
+# spacing to be applied. You want the spacings to get wider as the backups get
+# older. All of the numbers are in days. The values below are the defaults.
+#
+# aging_params:
+# - [0.5/24, 2]
+# - [1, 14]
+# - [7, 60]
+# - [30, 730]
+# - [365, -1]
