@@ -13,8 +13,14 @@ excludes: /path/to/excludes.xcl
 # directory as the yaml config file with the name of id.log.
 logfile: /path/to/logfile.log
 
-remote_host: user@host
-remote_sources: false
+# remote settings
+# omit remote to backup between local directories
+#
+# location can be 'src', 'dest', or 'none'
+# host should be a host recognizeable by ssh
+remote:
+    location: dest
+    host: user@host
 
 # List of paths to use as rsync SRC arguments
 sources:
