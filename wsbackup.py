@@ -226,8 +226,8 @@ class Backup(object):
         default_rsync_opts = ['--archive', '-hhh', '--delete', '--stats',
                               '--chmod=u+rw']
         if config.get('rsync_opts'):
-            config['rsync_opts'] = merge_opts(config['rsync_opts'],
-                                              default_rsync_opts)
+            config['rsync_opts'] = merge_opts(default_rsync_opts,
+                                              config['rsync_opts'])
         else:
             config['rsync_opts'] = default_rsync_opts
 
