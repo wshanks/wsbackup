@@ -44,10 +44,14 @@ destination: /some/target/path
 # Options to pass to the rsync command used to backup the files. The options
 # given below are the defaults and do not need to be specified. Options can be
 # removed by prefixing them with "no", e.g. "no--stats".
+#
+# Note that the chmod option is necessary for old backups to be linked against
+# and pruned.
 rsync_opts:
 - --archive
 - --delete
 - -hhh
 - --stats
+- --chmod=u+rw
 # For remote:
 # - --compress

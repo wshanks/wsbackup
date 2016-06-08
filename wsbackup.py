@@ -222,7 +222,9 @@ class Backup(object):
         if os.path.exists(xcl_default) and not default_set:
             config['excludes'].append(xcl_default)
 
-        default_rsync_opts = ['--archive', '-hhh', '--delete', '--stats']
+        # chmod: necessary for old backups to be deletable
+        default_rsync_opts = ['--archive', '-hhh', '--delete', '--stats',
+                              '--chmod=u+rw']
         if config.get('rsync_opts'):
             config['rsync_opts'] = merge_opts(config['rsync_opts'],
                                               default_rsync_opts)
