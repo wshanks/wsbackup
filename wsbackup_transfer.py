@@ -19,14 +19,8 @@ import yaml
 DATE_FORMAT = '%Y-%m-%d_%Hh%Mm%Ss'
 # TODO: Use ssh-agent to limit number of connection attempts?
 
-# TODO: rsync option merging + no- options
-# TODO: provide sample config file for logrotate and simple single rotation
-# option
-# TODO: option to transfer logfile to remote host
 # TODO: Test remote source transfers
 # TODO: Test remote dest transfers
-# TODO: Make cmd class that knows src/dest/host and when to wrap commands in
-#       an ssh call
 
 
 def pid_running(pid):
@@ -46,70 +40,30 @@ class WSBackupError(Exception):
     pass
 
 
-def parse_config(config_file, backup_state):
+def logfile_config(logfile, backup_id, working_dir):
     """
-    Parse config file into dictionary
+    Configure log file settings, with reasonable defaults for missing values
     """
-    with open(config_file) as yaml_config:
-        config = yaml.safe_load(yaml_config)
+    default_fname = backup_id + '.log'
+    defaults = {'path': os.path.join(working_dir, default_fname),
+                'max_bytes': 1e6,
+                'backup_count': 5,
+                'mode': 'a',
+                'copy_to_dest': False}
+    if isinstance(logfile, str):
+        if os.path.exists(logfile) and os.path.isdir(logfile):
+            logfile = {'path': os.path.join(logfile, default_fname)}
+        else:
+            logfile = {'path': os.path.join(working_dir, logfile)}
+    elif not isinstance(logfile, dict):
+        logfile = {}
 
-    if not config.get('id'):
-        config['id'] = 'wsbackup'
+    for key in defaults:
+        if key not in logfile:
+            logfile[key] = defaults[key]
 
-    if not config.get('logfile'):
-        config['logfile'] = os.path.join(backup_state.working_dir,
-                                         config['id'] + '.log')
-    if not config.get('overwrite_logfile'):
-        config['overwrite_logfile'] = False
+    return logfile
 
-    if not config.get('lockfile'):
-        config['lockfile'] = os.path.join(backup_state.working_dir,
-                                          config['id'] + '.lck')
-
-    if not config.get('excludes'):
-        config['excludes'] = []
-    xcl_default = os.path.join(backup_state.working_dir,
-                               config['id'] + '.xcl')
-    default_set = any([os.path.samefile(xcl, xcl_default)
-                       for xcl
-                       in config['excludes']])
-    if os.path.exists(xcl_default) and not default_set:
-        config['excludes'].append(xcl_default)
-
-    # TODO: Make it possible to remove the default options
-    default_rsync_opts = ['--archive', '--compress', '--human-readable',
-                          '--delete', '--chmod=ug+w', '--stats']
-    if config.get('rsync_opts'):
-        config['rsync_opts'] = config['rsync_opts'] + default_rsync_opts
-    else:
-        config['rsync_opts'] = default_rsync_opts
-
-    if not config.get('aging_params'):
-        config['aging_params'] = [
-            [0.5/24, 2],
-            [1, 14],
-            [7, 60],
-            [30, 730],
-            [365, -1]]
-    config['aging_params'] = [{'spacing': item[0], 'bound': item[1]}
-                              for item in config['aging_parms']]
-
-    remote = config.get('remote')
-    if remote:
-        if 'location' not in remote or 'host' not in remote:
-            err_str = ('"remote" config setting must include host and '
-                       'location.')
-            logging.critical(err_str)
-            WSBackupError(err_str)
-        if remote['location'] not in ['src', 'dest']:
-            err_str = ('"remote:location" config setting must be "src" or '
-                       '"dest"')
-            logging.critical(err_str)
-            WSBackupError(err_str)
-
-    config['backup_time'] = None
-
-    return config
 
 
 def add_out_format(rsync_opts):
@@ -131,6 +85,24 @@ def is_dry_run(rsync_opts):
                 if re.match('-n|--dry-run', opt.strip())])
 
 
+def merge_opts(opts, new_opts):
+    """
+    Merge new opts into opts.
+
+    If an entry of new_opts is prefixed by "no" remove it from opts if it is
+    there.
+    """
+    new_opts = [o for o in new_opts if re.match('-', o)]
+    no_opts = [o[2:] for o in new_opts if re.match('no-', o)]
+    for no_opt in no_opts:
+        for opt in opts:
+            if no_opt == opt or re.match(no_opt + ' ', opt):
+                opts.remove(opt)
+                break
+
+    return opts + new_opts
+
+
 class Backup(object):
     """
     Class defining methods for executing a backup and containing properties to
@@ -139,10 +111,11 @@ class Backup(object):
     def __init__(self, config_path, rsync_opts=None):
         self.working_dir = os.path.dirname(os.path.abspath(config_path))
         self.pid = os.getpid()
-        self.config = parse_config(config_path, self)
+        self.config = self.parse_config(config_path)
 
         if rsync_opts is not None:
-            self.config['rsync_opts'] = self.config['rsync_opts'] + rsync_opts
+            self.config['rsync_opts'] = merge_opts(self.config['rsync_opts'],
+                                                   rsync_opts)
 
         self._setup_log()
         logging.info('Backup started with PID %(pid)s', {'pid': self.pid})
@@ -151,6 +124,16 @@ class Backup(object):
         with open(self.config['lockfile'], 'w') as lockfile:
             lockfile.write(str(self.pid))
 
+    def __enter__(self):
+        """Enter function for use with with()"""
+        return self
+
+    # pylint: disable=redefined-builtin
+    def __exit__(self, type, value, traceback):
+        """Exit function for use with with()"""
+        self.cleanup()
+
+    # pylint: enable=redefined-builtin
     def _setup_log(self):
         """Initiate logging"""
         log_fmt = "%(asctime)s [%(levelname)-5.5s]  %(message)s"
@@ -159,17 +142,84 @@ class Backup(object):
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.INFO)
 
-        if self.config['overwrite_logfile']:
-            mode = 'w'
-        else:
-            mode = 'a'
-        file_handler = logging.FileHandler(self.config['logfile'], mode=mode)
+        file_handler = logging.handlers.RotatingFileHandler(
+            self.config['logfile']['path'],
+            mode=self.config['logfile']['mode'],
+            maxBytes=self.config['logfile']['max_bytes'],
+            backupCount=self.config['logfile']['backup_count'])
         file_handler.setFormatter(log_formatter)
         root_logger.addHandler(file_handler)
 
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(log_formatter)
         root_logger.addHandler(console_handler)
+
+    def backup_error(self, msg):
+        """Log error and raise exception"""
+        logging.error(msg)
+        raise WSBackupError(msg)
+
+    def parse_config(self, config_file):
+        """
+        Parse config file into dictionary
+        """
+        with open(config_file) as yaml_config:
+            config = yaml.safe_load(yaml_config)
+
+        if not config.get('id'):
+            config['id'] = 'wsbackup'
+
+        config['logfile'] = logfile_config(config.get('logfile'),
+                                           config['id'],
+                                           self.working_dir)
+
+        if not config.get('lockfile'):
+            config['lockfile'] = os.path.join(self.working_dir,
+                                              config['id'] + '.lck')
+
+        if not config.get('excludes'):
+            config['excludes'] = []
+        xcl_default = os.path.join(self.working_dir,
+                                   config['id'] + '.xcl')
+        default_set = any([os.path.samefile(xcl, xcl_default)
+                           for xcl
+                           in config['excludes']])
+        if os.path.exists(xcl_default) and not default_set:
+            config['excludes'].append(xcl_default)
+
+        default_rsync_opts = ['--archive', '-hhh', '--delete', '--stats']
+        if config.get('rsync_opts'):
+            config['rsync_opts'] = merge_opts(config['rsync_opts'],
+                                              default_rsync_opts)
+        else:
+            config['rsync_opts'] = default_rsync_opts
+
+        if not config.get('aging_params'):
+            config['aging_params'] = [
+                [0.5/24, 2],
+                [1, 14],
+                [7, 60],
+                [30, 730],
+                [365, -1]]
+        config['aging_params'] = [{'spacing': item[0], 'bound': item[1]}
+                                  for item in config['aging_parms']]
+
+        remote = config.get('remote')
+        if remote:
+            if 'location' not in remote or 'host' not in remote:
+                err_str = ('"remote" config setting must include host and '
+                           'location.')
+                self.backup_error(err_str)
+            if remote['location'] not in ['src', 'dest']:
+                err_str = ('"remote:location" config setting must be "src" or '
+                           '"dest"')
+                self.backup_error(err_str)
+        else:
+            config['remote'] = {'location': None, 'host': None}
+
+        config['backup_time'] = None
+
+        return config
 
     def check_lockfile(self):
         """
@@ -180,9 +230,9 @@ class Backup(object):
                 lockpid = lockfile.readline().strip()
             if pid_running(lockpid):
                 err_str = ('Lockfile for running process (PID: '
-                           '%(lockpid)s found, backup stopped.')
-                logging.critical(err_str, {'lockpid': lockpid})
-                raise WSBackupError(err_str, {'lockpid': lockpid})
+                           '{lockpid} found, backup stopped.')
+                err_str = err_str.format(lockpid=lockpid)
+                self.backup_error(err_str)
             else:
                 log_str = ('Lockfile for ghost process (PID: %(lockpid)s) '
                            'found, continuing backup.')
@@ -192,7 +242,19 @@ class Backup(object):
         """
         Clean up a failed backup.
         """
-        os.remove(self.config['lockfile'])
+        if os.path.exists(self.config['lockfile']):
+            os.remove(self.config['lockfile'])
+
+    def transfer_log(self):
+        """Transfer log file to remote destination"""
+        if (self.config['remote']['location'] != 'dest' or
+                not self.config['logfile']['copy_to_dest']):
+            return
+
+        cmd = 'rsync "{log}" {host}:"{dest}"'
+        cmd = cmd.format(log=self.config['logfile']['path'],
+                         dest=self.config['destination'])
+        self.exec_cmd(cmd, context='remote')
 
     def process_backup(self):
         """Main function for processing a backup request"""
@@ -201,19 +263,16 @@ class Backup(object):
         if files_transferred:
             self.update_latest()
             self.prune_backup()
+            logging.info('Backup finished')
+            self.transfer_log()
 
-        logging.info('Backup finished')
         self.cleanup()
 
     def get_backup_list(self):
         """Get list of all backup directories"""
-        remote = self.config.get('remote', {})
-        rem_loc = remote.get('location', None)
-        if rem_loc == 'dest':
-            ssh_cmd = 'ls "{dest}"'.format(dest=self.config['destination'])
-            ssh_cmd = 'ssh {host} {cmd}'.format(host=remote['host'],
-                                                cmd=ssh_cmd)
-            backup_list = subprocess.check_output(shlex.split(ssh_cmd))
+        if self.config['remote']['location'] == 'dest':
+            cmd = 'ls "{dest}"'.format(dest=self.config['destination'])
+            backup_list = self.exec_cmd(cmd, context='dest', output='output')
             backup_list = backup_list.split('\n')
         else:
             backup_list = os.listdir(self.config['destination'])
@@ -297,19 +356,18 @@ class Backup(object):
         # Delete backups
         logging.info('Pruning the following backups: %(b_list)s',
                      ' '.join(deletions))
-        self.remove_backups(deletions)
+        if not is_dry_run(self.config['rsync_opts']):
+            self.remove_backups(deletions)
 
     def remove_backups(self, deletions):
         """Remove directories in deletions from destination"""
-        remote = self.config.get('remote', {'location': None})
+        remote = self.config['remote']
         if remote['location'] == 'dest':
             dirs = ' '.join('"{}"'.format(d) for d in deletions)
             cmd = 'cd {dest} && rm -rf {dirs}'
             cmd = cmd.format(dest=self.config['destination'],
                              dirs=dirs)
-            ssh_cmd = 'ssh {host} "{cmd}"'.format(host=remote['host'],
-                                                  cmd=cmd)
-            subprocess.check_call(shlex.split(ssh_cmd))
+            self.exec_cmd(cmd, context='dest')
         else:
             for backup in deletions:
                 shutil.rmtree(os.path.join(self.config['destination'], backup))
@@ -318,25 +376,23 @@ class Backup(object):
         """
         Perform backup transfer of files
         """
-        remote = self.config.get('remote', {})
-        host = remote.get('host', None)
+        remote = self.config['remote']
         sources = self.config['sources']
         dest = self.config['destination']
-        if host is not None:
+        if remote['location'] is not None:
             if remote['location'] == 'src':
-                sources = [host + ':' + src for src in sources]
+                sources = ['{{host}}:' + src for src in sources]
             else:
-                dest = host + ':' + dest
+                dest = '{{host}}:' + dest
 
-        rsync_cmd = [('rsync')]
+        rsync_cmd = ['rsync']
 
         # Link against "latest" backup directory if it exists
         latest_exists = False
         latest = os.path.join(dest, 'latest')
-        if host and remote['location'] == 'dest':
-            ssh_cmd = 'ssh {host} "test -e {latest}"'.format(host=host,
-                                                             latest=latest)
-            latest_exists = subprocess.call(ssh_cmd) == 0
+        if remote['location'] == 'dest':
+            cmd = 'test -e {latest}'.format(latest=latest)
+            latest_exists = self.exec_cmd(cmd, context='dest') == 0
         else:
             latest_exists = os.path.exists(latest)
         if latest_exists:
@@ -358,8 +414,8 @@ class Backup(object):
 
         rsync_cmd = rsync_cmd + sources
         rsync_cmd.append(os.path.join(dest, 'incomplete'))
-        rsync_cmd = ' '.join(rsync_cmd)
-        subprocess.check_call(shlex.split(rsync_cmd))
+        cmd = ' '.join(rsync_cmd)
+        self.exec_cmd(cmd, context='src-dest')
 
         return not is_dry_run(self.config['rsync_opts'])
 
@@ -374,23 +430,17 @@ class Backup(object):
         self.config['backup_time'] = date_str
         target_date = os.path.join(dest, date_str)
         cmd = cmd.format(target_inc=target_inc, target_date=target_date)
-        remote = self.config.get('remote', {})
-        host = remote.get('host', None)
-        if host:
-            cmd = 'ssh {host} "{cmd}"'.format(host=host, cmd=cmd)
-        subprocess.check_call(shlex.split(cmd))
+        self.exec_cmd(cmd, context='dest')
 
         # symlink backup to latest
-        cmd1 = ("rm -f '{target_latest}'")
-        cmd2 = ("ln -s '{target_date}' '{target_latest}'")
-        cmd1 = cmd1.format(target_latest=os.path.join(dest, 'latest'))
-        cmd2 = cmd2.format(target_date=date_str,
-                           target_latest=os.path.join(dest, 'latest'))
-        if host:
-            cmd1 = 'ssh {host} "{cmd}"'.format(host=host, cmd=cmd1)
-            cmd2 = 'ssh {host} "{cmd}"'.format(host=host, cmd=cmd2)
-        subprocess.check_call(shlex.split(cmd1))
-        subprocess.check_call(shlex.split(cmd2))
+        cmd = ("rm -f '{target_latest}'")
+        cmd = cmd.format(target_date=date_str,
+                         target_latest=os.path.join(dest, 'latest'))
+        self.exec_cmd(cmd, context='dest')
+
+        cmd = ("ln -s '{target_date}' '{target_latest}'")
+        cmd = cmd.format(target_latest=os.path.join(dest, 'latest'))
+        self.exec_cmd(cmd, context='dest')
 
     def validate_host(self):
         """
@@ -398,20 +448,14 @@ class Backup(object):
         settings will work for transferring files for the backup.
         """
         remote = self.config.get('remote', {})
-        host = remote.get('host', None)
-        if host is None:
+        if remote is None:
             return
 
         # Test connectivity
-        ssh_test = ("ssh -q -q -o 'BatchMode=yes' -o 'ConnectTimeout 10' "
-                    "{ssh} exit &> /dev/null").format(ssh=host)
-        try:
-            subprocess.check_call(shlex.split(ssh_test))
-        except subprocess.CalledProcessError:
-            logging.critical('SSH connection %(host)s failed.', {'host': host})
-            self.cleanup()
-            raise WSBackupError('SSH connection %(host)s failed.',
-                                {'host': host})
+        cmd = ("-q -q -o 'BatchMode=yes' -o 'ConnectTimeout 10' "
+               "exit &> /dev/null")
+        self.exec_cmd(cmd, context='remote',
+                      err_str='SSH connection {host} failed.')
 
         # Check paths exist
         if remote['location'] == 'src':
@@ -420,24 +464,61 @@ class Backup(object):
             paths = [self.config['destination']]
 
         for path in paths:
-            ssh_test = '''ssh {host} "[ -d '{target}' ]"'''
-            ssh_test = ssh_test.format(host=host, target=path)
-            try:
-                subprocess.check_call(shlex.split(ssh_test))
-            except subprocess.CalledProcessError:
-                log_str = ('Target %(target)s does not exist on '
-                           '%(host)s. Backup stopped.')
-                logging.critical(log_str, {'target': path, 'host': host})
-                self.cleanup()
-                raise WSBackupError(log_str, {'target': path, 'host': host})
+            cmd = "[ -d '{target}' ]".format(target=path)
+            err_str = ('Target {target} does not exist on '
+                       '{{host}}.').format(target=path)
+            self.exec_cmd(cmd, context='remote', err_str=err_str)
+
+    def exec_cmd(self, cmd, output=None, context='local', err_str=None):
+        """
+        Execute shell command, over ssh if necessary
+
+        context: remote, src, dest, local, rsync
+
+        types of commands:
+        context-less cmd that can be called on local or remote depending on if
+            src or dest is remote
+        rsync command that needs to insert host: in front of src or dest if one
+            of them is remote
+        ssh test command that should only be checked on remote
+        """
+        remote = self.config['remote']
+        if (context == 'src' and remote['location'] == 'src' or
+                context == 'dest' and remote['location'] == 'dest' or
+                context == 'src-dest' and remote or
+                context == 'remote'):
+            loc = 'remote'
+        else:
+            loc = 'local'
+
+        if loc == 'remote' and context in ['src', 'dest']:
+            cmd = 'ssh {host} "{cmd}"'.format(host=remote['host'],
+                                              cmd=cmd)
+        elif loc == 'remote':
+            cmd = cmd.format(host=remote['host'])
+
+        if re.search('{host}', err_str):
+            err_str = err_str.format(host=remote['host'])
+
+        try:
+            if output == 'output':
+                output = subprocess.check_output(shlex.split(cmd))
+            elif output == 'exit_code':
+                output = subprocess.call(shlex.split(cmd))
+            else:
+                subprocess.check_call(shlex.split(cmd))
+        except subprocess.CalledProcessError:
+            self.backup_error(err_str)
+
+        return output
 
 
 def main(args):
     """
     Main script function
     """
-    backup_state = Backup(args['config'], rsync_opts=args['rsync_opt'])
-    backup_state.process_backup()
+    with Backup(args['config'], rsync_opts=args['rsync_opt']) as backup_state:
+        backup_state.process_backup()
 
 
 if __name__ == '__main__':
