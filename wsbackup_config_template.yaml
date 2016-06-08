@@ -13,6 +13,9 @@ excludes: /path/to/excludes.xcl
 # directory as the yaml config file with the name of id.log.
 logfile: /path/to/logfile.log
 
+remote_host: user@host
+remote_sources: false
+
 # List of paths to use as rsync SRC arguments
 sources:
 - /path/to/first/backup
@@ -20,6 +23,4 @@ sources:
 
 # Target to pass as the rsync DEST argument. Can either be another path on the
 # system, or a ssh formatted path to a remote destination.
-target: user@ssh.server.org:/some/target/path
-# target: /just/a/path
-# target: ssh_alias:/some/target/path
+destination: /some/target/path
