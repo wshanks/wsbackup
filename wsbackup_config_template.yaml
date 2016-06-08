@@ -29,9 +29,10 @@ logfile:
 #
 # location can be 'src', 'dest', or 'none'
 # host should be a host recognizeable by ssh
-remote:
-    location: dest
-    host: user@host
+#
+# remote:
+#     location: dest
+#     host: user@host
 
 # List of paths to use as rsync SRC arguments
 sources:
