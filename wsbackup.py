@@ -460,7 +460,7 @@ class Backup(object):
         if latest_exists:
             rsync_cmd.append('--link-dest=../latest')
 
-        log_fmt = '%t [%p] %o %f (%b / %l)'
+        log_fmt = "%t [%p] %i %f (%''b / %''l)"
         lfile = escape(self.config['logfile']['path'])
         rsync_cmd.append('--log-file={lfile}'.format(lfile=lfile))
         new_opt = '--log-file-format="{log_fmt}"'.format(log_fmt=log_fmt)
@@ -561,6 +561,7 @@ class Backup(object):
         elif loc == 'remote':
             cmd = cmd.format(host=remote['host'])
 
+        logging.debug(cmd)
         if not err_str:
             err_str = 'Error executing command: {}'.format(cmd)
 
