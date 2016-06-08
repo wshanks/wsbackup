@@ -1,0 +1,40 @@
+# id used to name lockfile and as the default for the logfile and excludes
+# files
+id: test_backup
+
+# File or list of files to pass to rsync's --exclude-from. Listed items can
+# either be paths to files or the names of files in the same directory as the
+# yaml config file. If the file (id).xcl exists in the same directory as the
+# yaml config file, it is also used.
+# excludes: /path/to/excludes.xcl
+
+# Path to the log file to create or append to. Treated as a relative path if
+# not an absolute path. If not specified, log file is created in the same
+# directory as the yaml config file with the name of id.log.
+logfile:
+    path: test.log
+    max_bytes: 1e6
+    mode: 'a'
+    copy_to_dest: False
+    backup_count: 5
+# Set to true to overwrite previous logfile with each run
+overwrite_logfile: False
+
+# remote settings
+# omit remote to backup between local directories
+#
+# location can be 'src', 'dest', or 'none'
+# host should be a host recognizeable by ssh
+
+# List of paths to use as rsync SRC arguments
+sources:
+- src
+
+# Target to pass as the rsync DEST argument. Can either be another path on the
+# system, or a ssh formatted path to a remote destination.
+destination: dest
+
+# List of options to pass to the rsync transfer command
+rsync_opts:
+- --verbose
+# - -n

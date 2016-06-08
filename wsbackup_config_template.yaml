@@ -8,9 +8,15 @@ id: my_backup
 # yaml config file, it is also used.
 excludes: /path/to/excludes.xcl
 
-# Path to the log file to create or append to. Treated as a relative path if
-# not an absolute path. If not specified, log file is created in the same
-# directory as the yaml config file with the name of id.log.
+# Logfile settings
+# (Other than path, the values given below are the defaults, and do not need to
+# be specified).
+# path: path to logfile to use. Defaults to id.log in the working directory
+# backup_count: number of rotated log files to keep (0 keeps all logs)
+# max_bytes: maximum size in bytes of log file before it is rotated (0 never
+#   rotates)
+# copy_to_dest: log file copied to remote destination if true
+# mode: file mode for logfile ('a' to append, 'w' to overwrite)
 logfile:
     path: /path/to/logfile.log
     max_bytes: 1e6
@@ -19,7 +25,7 @@ logfile:
     copy_to_dest: False
 
 # remote settings
-# omit remote to backup between local directories
+# Omit these settings to backup between local directories
 #
 # location can be 'src', 'dest', or 'none'
 # host should be a host recognizeable by ssh
@@ -32,16 +38,16 @@ sources:
 - /path/to/first/backup
 - /path/to/second/backup
 
-# Target to pass as the rsync DEST argument. Can either be another path on the
-# system, or a ssh formatted path to a remote destination.
+# Target to pass as the rsync DEST argument.
 destination: /some/target/path
 
+# Options to pass to the rsync command used to backup the files. The options
+# given below are the defaults and do not need to be specified. Options can be
+# removed by prefixing them with "no", e.g. "no--stats".
 rsync_opts:
 - --archive
 - --delete
 - -hhh
 - --stats
 # For remote:
-- --compress
-# Necessary?
-# - --chmod=ug+w
+# - --compress
