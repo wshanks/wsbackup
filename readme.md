@@ -1,136 +1,219 @@
-Backup notes
-============
-Introduction
-------------
-*NOTE:* these notes were written for the previous bash script version of the backup script. The general set up instructions still apply but the usage has changed. Now the script is `wsbackup.py`, and it requires that the `PyYAML` Python package be installed. The basic usage is to call it with a `-c` flag pointing to a config file formatted like `wsbackup_config_template.yaml`. Read the comments in that file and the output of `wsbackup.py -h` for more information. An update to this README needs to be made.
+# Backup notes
 
-These notes describe setting up a simple Ubuntu backup server for backing up remotely from another computer running Linux or OSX.  It is probably also possible to follow these notes to backup to a computer running OSX or backup from a computer running Windows (via cygwin) (Some subtle adjustments would probably be necessary.  For instance, you might need to tell rsync to use less precision in comparing file modification times).  These notes also assume that the backup server is being set up on a router, but it would probably not be too hard to set it up without one.
+## Introduction
 
-Choose back up disk file system
--------------------------------
-I think the best choice is just to go with ext3 since it is native to Linux.  The downside is that it does not have as good cross-platform support as other systems such as FAT32 (FAT32 does not have the Unix permissions that rsync tries to copy with the -a flag.  Also, FAT32 does not support symlinks and has reduced time resolution compared to other options), so it might be difficult to get a lot of files off the backup disk quickly (i.e. you couldn't plug the disk into a computer running OSX or Windows without installing a utility to translate from ext3).  Here are some resources as of 1/1/2013 for accessing ext3:
+`wsbackup.py` is a script for running simple, versioned backups with `rsync` to
+either a local or remote machine.
 
-Windows
-<http://www.ext2fsd.com/>
+### Use case
 
-OSX
-<http://reviews.cnet.com/8301-13727_7-57457850-263/how-to-manage-ext2-ext3-disks-in-os-x/>
-<http://osxfuse.github.com/>
-<http://sourceforge.net/projects/fuse-ext2/>
+The script works best for backing up lightly used data sets, such as the files
+on a desktop or laptop computer. For large datasets, especially those
+containing large, constantly changing files, a dedicated backup product should
+be used instead. Even for personal files, there are several other options that
+could considered including backup tools like
+[Borg](ihttp://borgbackup.readthedocs.org) (best for the case of constantly
+changing large files since it uses chunked deduplication) or file sync tools
+that support versioning like [Syncthing](https://syncthing.net/),
+[ownCloud](https://owncloud.org/), and
+[Seafile](https://www.seafile.com/en/home/). The main advantage of
+`wsbackup.py` over these tools is its simplicity. It is just a wrapper around
+`rsync` and just creates new folder on the file system for each backup (with
+unchanged files hardlinked to save space).
 
-Set up Ubuntu
-----------------------------------------
-There are few steps here:
+## Installation
 
-* Install Ubuntu (<http://www.ubuntu.com/download/desktop>). It should be pretty straightforward to set up a USB installer following Ubuntu's directions.  To be safe, choose a strong password for any user accounts that can sudo.
+The only requirements for the script are `python` (version 3.4 or higher),
+`rsync`, and the Python package `PyYaml` (used for parsing the config file).
 
-* Create a user account that you want to use for logging in remotely (this could be the same as the account that you created when installing Ubuntu, just be aware of its login name and password).
+## Usage
 
-* Install the backup disk (if it is not the boot drive...).  Assign a static name to the drive (i.e. don't just use the default name that Ubuntu gives it so it can't be unmounted/remounted and assigned a different name).
+Here is the output of `wsbackup.py -h`:
 
-* Create a directory on the backup disk to hold the backups and make sure that the backup user account has write access to the directory (using chmod).
+```
+usage: Backup files via rsync [-h] --config CONFIG [--rsync-opt RSYNC_OPT]
 
-* Install an ssh server.  To do this, just run this command: 
+optional arguments:
+  -h, --help            show this help message and exit
+  --config CONFIG, -c CONFIG
+                        Path to yaml configuration file defining backup
+                        procedure.
+  --rsync-opt RSYNC_OPT, -r RSYNC_OPT
+                        Arguments passed to rsync (be sure to use -r="--
+                        option" syntax to avoid --option being consumed by
+                        this command).
+```
 
-`sudo apt-get install openssh-server openssh-client`
+Most of the available options are set in the config file rather than on the
+command line. The config file is written in YAML format.
+`wsbackup_config_template.yaml` is a heavily commented example file containing
+most of the possible config settings. Please read it to understand the details.
 
-By default, the server is set to run on startup.  So there is not much more to do, but see the section on remote access below.
+The basic usage is to run `wsbackup.py -c <config.yaml>`. The config file
+specifies some number of paths as "sources" and one path as a "destination".
+All of the source paths will be copied by `rsync` into a subdirectory of the
+destination named after the date of the backup. There is a remote option that
+can be set to have `rsync` to connect to either the sources or the destination
+via `ssh`. The config file also has entries for keeping logs of which files
+were backed up, excluding files, and passing specific options to `rsync`.
 
-Set up RSA key pair with ssh-keygen and ssh-copy-id
----------------------------------------------------
-Allowing traditional login via a password is not that safe because an attacker could try to crack it via repeated logins.  An alternative is to setup an RSA keypair between the remote computer to be backed up and the server.  This is basically like using a really long password that is stored on the two computers, so no password needs to be entered each time a connection is made.
+## How it works
 
-I was setting up a laptop running OSX as my remote machine, so I did the following: 
+The basic outline of steps taken by the script is as follows:
+* Open the logfile
+* Check for a lockfile and exit if one is found indicating a previous back up
+  that is still running.
+* Test `ssh` connection if using a remote
+* Transfer the files using `rsync` to a subfolder of the destination named
+  "incomplete" using the `--link-dest` `rsync` option to hardlink unchanged
+files to the previous backup (note that an interrupted backup will leave a
+partial transfer in this `incmplete` folder and a subsequent backup will
+effectively resume the previous one).
+* Once the transfer finishes, rename the "incomplete" subfolder with the
+  current time.
+* Change the "latest" symlink to point to the new backup folder.
+* Prune older backups using the aging parameters specified in the config file.
+* Transfer the logfile to the destination.
+* Remove the lockfile
 
-* ran ssh-keygen on the remote machine in the home directory.  
+These notes describe setting up a simple Ubuntu backup server for backing up
+remotely from another computer running Linux or OSX.  It is probably also
+possible to follow these notes to backup to a computer running OSX or backup
+from a computer running Windows (via cygwin) (Some subtle adjustments would
+probably be necessary.  For instance, you might need to tell rsync to use less
+precision in comparing file modification times).  These notes also assume that
+the backup server is being set up on a router, but it would probably not be too
+hard to set it up without one.
 
-* installed ssh-copy-id with:
+This is not the first wrapper script written to use `rsync` as a versioned
+backup tool. Here a couple that I looked at for inspiration:
 
-`sudo /usr/bin/curl "http://hg.mindrot.org/openssh/raw-file/c746d1a70cfa/contrib/ssh-copy-id" -o /usr/bin/ssh-copy-id`
+* (http://randombytes.org/backups.html)
+* (http://www.jan-muennich.de/linux-backups-time-machine-rsyn)
 
-(I had to use `/usr/bin/curl` because another piece of software messed up my path to curl).
+## Appendix
 
-* ran `ssh-copy-id user@server` to copy the RSA key to the server.  Here  `user` is the login name to use on the server and `server` is the ip address of the server.  We haven't set up remote access yet, so the remote machine needs to be connected to the same router as the server and the ip address is the local ip address on the router (probably 192.168.1.x for some number x -- on most routers, you can check the ip address by logging into at with a web browser at 192.168.1.1).  You should be prompted to enter the user account's password.
+Here are some additional (old) notes on setting up systems to backup using the
+script. These notes used to be longer (check the git history) because I wrote
+them when I was knew to Linux and did not know what was obvious and what
+wasn't. I am keeping them here but cutting them down to the basic steps that
+can be used as starting points for looking up more complete guides online.
 
-Set up remote access
---------------------
-Now we are almost ready to open up the server to the outside world.  
+### Choosing a file system
 
-Before exposing the server to the outside, we review a few notes about security.  Security concerns are addressed here (I posted the question):
+The script works best when the destination supports hard links (which let
+multiple paths on the file system point to the underlying file, saving space).
+ext3 and ext4 (usually the default on Linux systems) support hard links. NTFS
+also supports hard links but I have never tried to use it. NTFS has the benefit
+being better supported across all platforms than ext4, so it might be worth
+considering, but do some research on cross-platform issues if they are relevant
+to you. Some NTFS features available on Linux might not work when the partition
+is mounted under Windows.
 
-<http://askubuntu.com/questions/229944/how-to-set-up-an-rsync-backup-to-ubuntu-securely>
+### Setting up a Linux backup server
 
-Basically, set `PasswordAuthentication no` in `/etc/sshd_config` and make sure that `challengeresponse` is also set to `no`.  If you don't have a router, you should turn on a firewall and consider fail2ban.
+* Install Linux. Ubuntu has a user friendly installer and long term support
+  release. Debian also works well though the installer requires a little more
+user knowledge.
 
-To open the server to the outside world, set up the router to forward TCP on port 22 (the default port for ssh) to the server.  On my Actiontec router from Verizon, this was simple to do (login into the router at 192.168.1.1, go to "Firewall Settings"->"Port forwarding", and then select the server in the first drop-down menu and SSH in the second).  On other routers, it might be necessary to enter the server's MAC address and assign it a static ip address on the router and then forward the port to that static address.
+* Create a user account that you want to use for logging in remotely
 
-Now the server can be accessed via ssh from the outside world.  To do so, you need the ip address of the router.  The ip address can be checked in various ways, for example by going to <http://whatismyip.org/>.  Most home internet connections have dynamic ip addresses that can change.  To create a static address that will always work, you can use a dynamic DNS service like <http://www.no-ip.com/> (a good free one).  The Actiontec router is set up to work with several dynamic DNS services (including no-ip; just go to "Advanced"->"Dynamic DNS" in the router web interface), so I just set it up to update no-ip when its ip address changes.  Alternatively, one could set up a client like ddclient (<http://sourceforge.net/apps/trac/ddclient/>) on the server to monitor the ip address and update the dynamic DNS service.
+* Install the backup disk (if it is not the boot drive...) and assign it a static
+  name (desktop environments like Unity or GNOME will mount drives
+automatically but might not give it the same name each time).
 
-A lot of the dynamic DNS services have cut back on their free options, so it might be necessary to hunt around for one (<http://freedns.afraid.org> is another one that looked promising but wasn't a default option in my router).  I had set up a script to check my ip address and upload it to an ftp server before the respondent to my askubuntu.com question said to just go with the simplest solution.  Something like that is an option though.  All you need is something that will check the ip address (by going to e.g. <checkip.dyndns.org> and parsing the content) and then send something out somewhere when a change is noticed.  So far, I have left my router on and plugged in and the ip address has not changed in over a month, so you could get away without setting up anything as long as you were okay with the occasional break in connectivity (dependent upon how often your ip address changes).
+* Create a directory on the backup disk to hold the backups and make sure that
+  the backup user account has write access to the directory (using chmod).
 
-Backup script setup
--------------------
-Finally, a script needs to be written to handle the transferring and managing of backups from the remote machine to the server.  I used the following two scripts as my starting point:
+* Install OpenSSH as a server. In some distributions, the server and client are
+  separate packages. Some distributions set up the `ssh` server to run at
+startup when you install it.
 
-<http://randombytes.org/backups.html>
-<http://www.jan-muennich.de/linux-backups-time-machine-rsyn>
+#### Remote acces with `ssh`
 
-The rsync command does most of the work.  The rest of the scripts are basically just error checking the connection and previously started backups and then deleting old backups.  You can set the script to run automatically with something like cron or Automator or you can just run it by hand.  I like creating single line AppleScript applications that call other scripts with "do shell script" so that I can run them from SpotLight.
+There are a lot of bots that crawl the web trying to brute force `ssh` servers
+with password guesses. Disable password authentication before opening your
+server to the internet so that there is no chance that they compromise your
+server (though using a long, strong password should be safe).
 
-My current scripts are `wsbackup_transfer.sh` and `wsbackup_prune.py` available at <https://github.com/willsALMANJ/wsbackup>.
+* Generate a key file with `ssh-keygen` on the client that will be connecting
+  to the server.
 
-The generic entries in my excludes file are:
-.DS_Store
-Thumbs.db
-*~
-._*
+* Copy the key into the server's `authorized_keys` file in `~/.ssh`.
+  `ssh-copy-id` will do this for you.
 
-Encrypt data (optional)
------------------------
-If you're just backing up data to a private server, it's probably not necessary to encrypt it beforehand.  The transfer scripts described above will encrypt the data as it is transferred via ssh, and if the server is only accessible via an RSA key it should be pretty secure.  However, if the server is set up to share the files more publicly or the data is backed up to third party cloud storage service (e.g. DropBox), you might want to encrypt some file before transferring, just to protect it (e.g. in case someone gets your DropBox password).  
+* Test that connecting with a key works.
 
-One encryption option is encfs which works on Linux or OS X (see [this custom homebrew formula](https://github.com/jollyjinx/encfs.macosx) for one option for getting encfs working with OS X).  It allows you to mount a folder ("tmp") as a drive linked to a second folder ("enc").  Anything that is saved into tmp is actually saved into "enc" in encrypted form.  This functionality does not totally encrypt the data (each file is encrypted separately so you can still read the file size and see the directory hierarchy), but it does work with versioned backups.
+* Disable password authentication on the server (modify `sshd_config` in
+  `/etc`) and restart `sshd` (see, eg,
+(http://askubuntu.com/questions/229944/how-to-set-up-an-rsync-backup-to-ubuntu-securely)).
 
-In the `encryption` folder, there are two scripts, `encode_vault.sh` and `vault_update.applescript`, that help with encrypting files for back up.  `encode_vault.sh` mounts an encfs folder `enc` (name can be set in script) to a folder `tmp` (name can be set in script), syncs the contents of the folder `plain` containing `encode_vault.sh` into `tmp` and then unmounts it.  The folder `plain` containing `encode_vault.sh` can have any name.  The folder containing the `tmp`, `enc`, and `plain` folders should also contain the encfs .xml file for the encrypted folder.  The `vault_update.applescript` script just calls `encode_vault.sh` after prompting for the password.  It could be saved as an .app file for easy calling from Spotlight in OS X.  Note that the script is set up to be run in OS X, and the `umount` command needs to be changed to `fusermount -u` for Linux.
+* If you are annoyed by the bots trying to log in, consider using `fail2ban`.
+  On some Linux distributions, just installing it will set it up to run on
+`ssh` failures with reasonable default settings.
 
-When you set up the encrypted folder for the first time, encfs creates a file named `.encfs6.xml` in the encrypted folder.  This file contains the password encrypted version of the encryption key for the encfs folder.  The script needs this file to be moved to the parent folder of `enc` because the idea is that the `enc` folder will be backed up to a less secure location.  If the `.encfs6.xml` file were left in the `enc` folder, someone would just need to guess the password to unencrypt the key and thus all of the files.  Without the `.encfs6.xml` file, someone would need to guess the entire key.  It's probably a good idea to back up the `.encfs6.xml` since the files can't be unencrypted without it, but I'd recommend backing it up somewhere else that it's unlikely that someone trying to access your files would look.  It's not a very big file, so you could, for example, give it an innocuous name and email it to yourself as an attachment.
+* Set up your router (assuming the `ssh` server is behind a router):
 
-Appendix: extra stuff not done
-==============================
+  - In the router settings (typically accessed via the web interface at
+    192.168.1.1), set port 22 (the default ssh port) to be forwarded to the
+server (typically under firewall settings).
 
-IP update through ftp instead of dynamic DNS
---------------------------------------------
-There are some free services available for reserving and updating a dynamic DNS address to point to your home ip.  When I looked into this, most sites recommended DynDNS (of dyn.com) as the premier option that many manufacturers built in support for (stuff like webcams and media streaming devices).  However, Dyn had just decided to discontinue its free service except for allowing one free address that you could get by signing up for their pay service and then canceling during the 14-day free trial.  The free address came with a 30-day inactivity expiration.  There are other sites like no-ip.com and freedns.afraid.org that still have more generally free services, but it seems like in general free dynamic DNS services are being phased out by (pretty cheap) pay services.
+	+ How this is set up depends on the router, but try to do it in a way that
+	  will persist across reboots (e.g. use the server's hostname or MAC
+address).
 
-An alternative that I thought of was to use an ftp account I have access to to push a file containing the server's ip address to and then to grab that file with the remote computer before connecting with rsync/ssh.  Here are the commands for scripting these sets of actions.  I included an encryption of the ip address just to draw less attention since the ftp transfer was not secure.
+	+ This allows you to `ssh` into the server from the outside if you know the
+	  router's ip address.
 
-Get the current ip address and write to file:
-`curl -s checkip.dyndns.org|sed -e 's/.*Current IP Address: //' -e 's/<.*$//' > ip`
+	+ You can check the router's ip address by going to a site like
+	  (whatismyip.org) from a machine connected to the router.
 
-Encrypt file with ip address:
-`openssl aes-256-cbc -salt -a -e -pass pass:password -in ip -out ipenc`
+  - Setting up dynamic DNS is more robust than using the router's ip address.
 
-Push file to ftp account:
-`/usr/bin/curl -Q '-SITE CHMOD 600 ip' -u user:password -T ip ftp://ftp.domain.com`
+	+ Many routers support some DNS services natively (look for DNS settings in
+	  the various settings sections).
 
-Get file from ftp account:
-`/usr/bin/curl -d user:password -T ip ftp://ftp.domain.com`
+	+ One DNS service with a free option is (www.no-ip.com).
 
-Decrypt file:
-`openssl aes-256-cbc -salt -a -d -pass pass:password -in ipenc -out ip`
+#### Encryption / security
 
-Other safety measures
----------------------
-These safety measures were discussed at some places but are for more public servers:
+* Using `ssh` encrypts data in transit to the server. If you only allow access
+  via a public/private key pair, the data should be pretty safe, especially if
+you use `fail2ban` and do not install a lot of extra applications on the server
+(and install security updates in a timely manner and check authentication
+logs).
 
-* Use a firewall on the server (ufw)
-* Use a non-standard port for the transfer
-* Use fail2ban
+* If you are worried about the data on the server's hard drive, encryption the
+  partition or container using LUKS.
 
-Some of these suggestions are discussed in the references below:
+* If you are worried about the data being accessible if the server is
+  compromised, you could consider using `encfs --reverse` to mount the folder
+as an encrypted file system and backing that up instead. Be aware that `encfs`
+has been audited and found to contain some security flaws that still remain
+after a couple. I'm not aware of any other program (other than very small
+projects that I wouldn't trust with important data) that have a feature similar
+to `encfs --reverse`. One alternative for encryption is `git annex` though it
+is not simple to set up (and would be used instead of this script). `borg` also
+has encryption features.
 
-<http://askubuntu.com/questions/85462/what-is-my-computer-ip-address-knowing-that-i-have-a-router>
-<http://www.cyberciti.biz/faq/unix-linux-bsd-osx-change-rsync-port-number/>
-<http://www.howtogeek.com/115116/how-to-configure-ubuntus-built-in-firewall/>
-<http://hints.macworld.com/article.php?story=20031024013757927>
-<http://www.fail2ban.org/wiki/index.php/Main_Page>
+* If you do use encryption, be sure to make several robust backups of your
+  encryption keys.
+
+* Consider the likelihood of your server being compromised versus your machine
+  being backed. It might be more secure to run the script from your server with
+your machine to be backed up as a remote source, so that your machine does not
+need to have full access to the server.
+
+* Some other measures to consider:
+
+	+ Use a firewall on the server (ufw)
+	+ Use a non-standard port for the transfer
+	+ Use port-knocking
+
+	+ Some of these suggestions are discussed in the references below:
+
+		- <http://askubuntu.com/questions/85462/what-is-my-computer-ip-address-knowing-that-i-have-a-router>
+		- <http://www.cyberciti.biz/faq/unix-linux-bsd-osx-change-rsync-port-number/>
+		- <http://www.howtogeek.com/115116/how-to-configure-ubuntus-built-in-firewall/>
+		- <http://hints.macworld.com/article.php?story=20031024013757927>
+		- <http://www.fail2ban.org/wiki/index.php/Main_Page>
